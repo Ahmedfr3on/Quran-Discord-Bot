@@ -9,72 +9,109 @@ const {
   createAudioPlayer,
   createAudioResource,
   AudioPlayerStatus,
-  NoSubscriberBehavior
+  NoSubscriberBehavior,
+  StreamType,
+  entersState,
+  VoiceConnectionStatus
 } = require("@discordjs/voice");
 
 const { Readable } = require("stream");
+const { spawn } = require("child_process");
+const ffmpegPath = require("ffmpeg-static");
 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildVoiceStates,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
+    GatewayIntentBits.GuildVoiceStates
   ]
 });
 
 const TOKEN = process.env.DISCORD_TOKEN;
 const CHANNEL_ID = process.env.VOICE_CHANNEL_ID;
-
-// ضع رابط ملف تلاوة صوتي مباشر وموثوق هنا لاحقاً
-const QURAN_AUDIO_URL = process.env.QURAN_AUDIO_URL;
-
-let connection;
-let player;
+const AUDIO_URL = process.env.QURAN_AUDIO_URL;
 
 client.once("ready", async () => {
-  console.log(`Bot is online: ${client.user.tag}`);
+  console.log(`Bot online: ${client.user.tag}`);
 
-  if (!CHANNEL_ID || !QURAN_AUDIO_URL) {
-    console.log("Set VOICE_CHANNEL_ID and QURAN_AUDIO_URL");
-    return;
-  }
-
-  const channel = await client.channels.fetch(CHANNEL_ID);
-
-  if (!channel || !channel.isVoiceBased()) {
-    console.log("Voice channel not found");
-    return;
-  }
-
-  connection = joinVoiceChannel({
-    channelId: channel.id,
-    guildId: channel.guild.id,
-    adapterCreator: channel.guild.voiceAdapterCreator,
-    selfDeaf: true
-  });
-
-  player = createAudioPlayer({
-    behaviors: {
-      noSubscriber: NoSubscriberBehavior.Play
+  try {
+    if (!TOKEN || !CHANNEL_ID || !AUDIO_URL) {
+      throw new Error("Missing environment variables");
     }
-  });
 
-  connection.subscribe(player);
+    const channel = await client.channels.fetch(CHANNEL_ID);
 
-  const response = await fetch(QURAN_AUDIO_URL);
+    if (!channel || !channel.isVoiceBased()) {
+      throw new Error("Voice channel not found");
+    }
 
-  if (!response.ok || !response.body) {
-    throw new Error("Audio source unavailable");
+    const connection = joinVoiceChannel({
+      channelId: channel.id,
+      guildId: channel.guild.id,
+      adapterCreator: channel.guild.voiceAdapterCreator,
+      selfDeaf: true
+    });
+
+    await entersState(
+      connection,
+      VoiceConnectionStatus.Ready,
+      30000
+    );
+
+    console.log("Voice connection ready");
+
+    const player = createAudioPlayer({
+      behaviors: {
+        noSubscriber: NoSubscriberBehavior.Play
+      }
+    });
+
+    connection.subscribe(player);
+
+    const response = await fetch(AUDIO_URL);
+
+    if (!response.ok || !response.body) {
+      throw new Error(`Audio HTTP error: ${response.status}`);
+    }
+
+    const ffmpeg = spawn(ffmpegPath, [
+      "-hide_banner",
+      "-loglevel", "error",
+      "-i", "pipe:0",
+      "-f", "s16le",
+      "-ar", "48000",
+      "-ac", "2",
+      "pipe:1"
+    ]);
+
+    ffmpeg.stderr.on("data", data => {
+      console.error("FFmpeg:", data.toString());
+    });
+
+    ffmpeg.on("error", error => {
+      console.error("FFmpeg error:", error);
+    });
+
+    Readable.fromWeb(response.body).pipe(ffmpeg.stdin);
+
+    const resource = createAudioResource(ffmpeg.stdout, {
+      inputType: StreamType.Raw
+    });
+
+    player.on("stateChange", (oldState, newState) => {
+      console.log("Player:", newState.status);
+    });
+
+    player.on("error", error => {
+      console.error("Player error:", error.message);
+    });
+
+    player.play(resource);
+
+    console.log("Quran playback started");
+
+  } catch (error) {
+    console.error("BOT ERROR:", error);
   }
-
-  const audioStream = Readable.fromWeb(response.body);
-
-  const resource = createAudioResource(audioStream, {
-    inputType: require("@discordjs/voice").StreamType.Arbitrary
-  });
-
-  player.play(resource);
 });
 
 client.login(TOKEN);
